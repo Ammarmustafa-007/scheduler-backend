@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import multer from 'multer';
 
 import adminRoutes from './routes/admin.js';
 import timetableRoutes from './routes/timetable.js';
@@ -12,25 +11,16 @@ const app = express();
 
 // Configure CORS
 const corsOptions = {
-  origin: ['http://localhost:3000', 'http://localhost:3002'],
+  origin: true, // Allow all origins for local development
   credentials: true,
 };
 app.use(cors(corsOptions));
 
-// Body parser
-app.use(express.json());
+// Body parser with increased limit for large PDF parser payloads
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Multer configuration for PDF uploads (memory storage, 25MB limit)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
-});
 
-// We attach multer to the app object or export it if needed by routes.
-// Here we'll just export it so routes can import it if they need to handle uploads directly,
-// but since routes are mounted here, we could pass it or let routes configure their own.
-// Actually, it's better to export the upload middleware for routes to use.
-export { upload };
 
 // Mount routes
 app.use('/api/admin', adminRoutes);
