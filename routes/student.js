@@ -34,6 +34,21 @@ router.post('/upgrade/request', async (req, res) => {
   }
 });
 
+router.post('/upgrade/acknowledge', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('users')
+      .update({ pro_request_status: 'none' })
+      .eq('id', req.user.id);
+
+    if (error) throw error;
+
+    res.status(200).json({ status: 'success' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.post('/parse-personal', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
