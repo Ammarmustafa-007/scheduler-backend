@@ -13,6 +13,27 @@ router.post('/preferences/parse', (req, res) => {
   res.status(200).json({ status: 'ok', route: 'POST /preferences/parse' });
 });
 
+router.post('/upgrade/request', async (req, res) => {
+  try {
+    const { pin } = req.body;
+    if (pin !== '0000') {
+      return res.status(400).json({ error: 'Invalid PIN. Please enter 0000 to simulate payment.' });
+    }
+
+    // Update user's pro_request_status in Supabase
+    const { error } = await supabase
+      .from('users')
+      .update({ pro_request_status: 'pending' })
+      .eq('id', req.user.id);
+
+    if (error) throw error;
+
+    res.status(200).json({ status: 'success', message: 'Payment processed. Request sent to admin for review.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.post('/parse-personal', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {

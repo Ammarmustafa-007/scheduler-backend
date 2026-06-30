@@ -347,10 +347,11 @@ router.get('/users', async (req, res) => {
 router.patch('/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { role, plan } = req.body;
+    const { role, plan, pro_request_status } = req.body;
     const updateData = {};
     if (role !== undefined) updateData.role = role;
     if (plan !== undefined) updateData.plan = plan;
+    if (pro_request_status !== undefined) updateData.pro_request_status = pro_request_status;
     
     const { data, error } = await supabase.from('users').update(updateData).eq('id', id).select().single();
     if (error) throw error;
