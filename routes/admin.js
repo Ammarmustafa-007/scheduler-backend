@@ -9,6 +9,9 @@ const router = express.Router();
 router.use(checkRole('admin'));
 
 router.post('/upload', upload.single('file'), async (req, res) => {
+  const uploadStartedAt = performance.now();
+  const secondsSince = (start) => Number(((performance.now() - start) / 1000).toFixed(3));
+
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No PDF file uploaded' });
@@ -45,17 +48,21 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     const blob = new Blob([req.file.buffer], { type: 'application/pdf' });
     formData.append('pdf', blob, req.file.originalname || 'timetable.pdf');
 
+    const parserStartedAt = performance.now();
     const parserResponse = await fetch(`${process.env.PYTHON_SERVICE_URL || 'http://localhost:5000'}/parse/pdfplumber`, {
       method: 'POST',
       body: formData
     });
+    const parser_request_seconds = secondsSince(parserStartedAt);
 
     if (!parserResponse.ok) {
       const errorText = await parserResponse.text();
       throw new Error(`Parser service failed with status: ${parserResponse.status}. Details: ${errorText}`);
     }
 
+    const parserJsonStartedAt = performance.now();
     const parsedData = await parserResponse.json();
+    const parser_json_seconds = secondsSince(parserJsonStartedAt);
     
     // We expect the parser to return { pdfplumber: { summary: ... }, data: { semesters: ... } }
     // Or if hitting single engine directly it might return { engine: 'pdfplumber', summary: ..., data: ... }
@@ -84,6 +91,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
        return `${hours.padStart(2, '0')}:${minutes}:00`;
     };
 
+    const flattenStartedAt = performance.now();
     hierarchy.semesters.forEach(sem => {
       Object.entries(sem.timetable).forEach(([section, days]) => {
         Object.entries(days).forEach(([day, daySlots]) => {
@@ -109,6 +117,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         });
       });
     });
+    const flatten_seconds = secondsSince(flattenStartedAt);
 
     const teachers = Array.from(teachersSet).map(name => ({ name }));
     const rooms = Array.from(roomsSet).map(name => ({ name }));
@@ -131,9 +140,11 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     };
 
     // 5. Call Supabase RPC
+    const rpcStartedAt = performance.now();
     const { data: newVersionId, error: rpcError } = await supabase.rpc('upload_parsed_timetable', {
       payload: rpcPayload
     });
+    const rpc_seconds = secondsSince(rpcStartedAt);
 
     if (rpcError) {
       console.error("RPC Error details:", rpcError);
@@ -144,12 +155,23 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     }
 
     const needs_review_slots = slots.filter(s => s.needs_review);
+    const timings = {
+      parser_request_seconds,
+      parser_json_seconds,
+      parser_service: parsedData.timings || null,
+      flatten_seconds,
+      rpc_seconds,
+      total_seconds: secondsSince(uploadStartedAt)
+    };
+
+    console.log('Upload timings:', timings);
 
     res.status(200).json({
       status: 'success',
       version_id: newVersionId,
       summary,
-      needs_review_slots
+      needs_review_slots,
+      timings
     });
 
   } catch (error) {
