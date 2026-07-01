@@ -214,7 +214,10 @@ const getTeacherSlotsForUser = async (req) => {
 
 const getPlannerCatalogForUser = async (req) => {
   const profile = await getUserProfile(req);
-  const teacherRows = await findTeacherRowsForUser(req, profile);
+  // The planner browses the full latest timetable catalog, so matching the
+  // current user against timetable_teachers is unnecessary here and can be slow
+  // on large teacher tables.
+  const teacherRows = [];
 
   const { data: latestVersions, error: latestVersionError } = await supabase
     .from('timetable_versions')
@@ -237,7 +240,7 @@ const getPlannerCatalogForUser = async (req) => {
     slots = await fetchPaged(() =>
       supabase
         .from('timetable_slots')
-        .select('id, version_id, subject, section, day, slot_number, start_time, end_time, teacher_id, room_id, slot_type, col_span, teacher:timetable_teachers(name), room:rooms(name)')
+        .select('id, version_id, subject, section, day, slot_number, start_time, end_time, room:rooms(name)')
         .in('version_id', scopedVersions.map(version => version.id))
         .order('day')
         .order('start_time')
@@ -247,7 +250,7 @@ const getPlannerCatalogForUser = async (req) => {
     slots = await fetchPaged(() =>
       supabase
         .from('timetable_slots')
-        .select('id, version_id, subject, section, day, slot_number, start_time, end_time, teacher_id, room_id, slot_type, col_span, teacher:timetable_teachers(name), room:rooms(name)')
+        .select('id, version_id, subject, section, day, slot_number, start_time, end_time, room:rooms(name)')
         .order('day')
         .order('start_time')
     );
@@ -526,25 +529,35 @@ router.get('/makeup/options', async (req, res) => {
           subject: slot.subject,
           sections: new Set(),
           version_ids: new Set(),
-          meetings: []
+          section_version_ids: new Map(),
+          meetings: [],
+          meeting_count: 0
         });
       }
 
       const subject = semester.subjects.get(slot.subject);
       subject.sections.add(slot.section);
       if (slot.version_id) subject.version_ids.add(slot.version_id);
-      subject.meetings.push({
-        slot_id: slot.id,
-        version_id: slot.version_id,
-        version_label: versionMap.get(slot.version_id)?.version_label || null,
-        section: slot.section,
-        day: slot.day,
-        slot_number: slot.slot_number,
-        start_time: normalizeTime(slot.start_time),
-        end_time: normalizeTime(slot.end_time),
-        time_label: formatTimeRange(slot.start_time, slot.end_time),
-        room_name: slot.room?.name || 'TBA'
-      });
+      if (!subject.section_version_ids.has(slot.section)) {
+        subject.section_version_ids.set(slot.section, new Set());
+      }
+      if (slot.version_id) subject.section_version_ids.get(slot.section).add(slot.version_id);
+      subject.meeting_count += 1;
+
+      if (subject.meetings.length < 4) {
+        subject.meetings.push({
+          slot_id: slot.id,
+          version_id: slot.version_id,
+          version_label: versionMap.get(slot.version_id)?.version_label || null,
+          section: slot.section,
+          day: slot.day,
+          slot_number: slot.slot_number,
+          start_time: normalizeTime(slot.start_time),
+          end_time: normalizeTime(slot.end_time),
+          time_label: formatTimeRange(slot.start_time, slot.end_time),
+          room_name: slot.room?.name || 'TBA'
+        });
+      }
     });
 
     const semesters = [...semesterMap.values()]
@@ -559,6 +572,10 @@ router.get('/makeup/options', async (req, res) => {
             subject: subject.subject,
             sections: [...subject.sections].sort(),
             version_ids: [...subject.version_ids],
+            section_version_ids: Object.fromEntries(
+              [...subject.section_version_ids.entries()].map(([section, ids]) => [section, [...ids]])
+            ),
+            meeting_count: subject.meeting_count,
             meetings: subject.meetings.sort((a, b) => `${a.day}-${a.start_time}`.localeCompare(`${b.day}-${b.start_time}`))
           }))
           .sort((a, b) => a.subject.localeCompare(b.subject))
