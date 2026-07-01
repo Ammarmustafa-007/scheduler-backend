@@ -10,8 +10,119 @@ const router = express.Router();
 router.use(checkRole('student'));
 
 const GENERATION_TOKEN_COST = 100;
+const DAY_ORDER = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
 const isDevUser = (user) => user?.id === 'dev-001';
+
+const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
+
+const normalizeTime = (time) => {
+  if (!time) return '';
+  const [h = '00', m = '00', s = '00'] = String(time).split(':');
+  return `${h.padStart(2, '0')}:${m.padStart(2, '0')}:${s.padStart(2, '0')}`;
+};
+
+const minutesFromTime = (time) => {
+  const [h = '0', m = '0'] = normalizeTime(time).split(':');
+  return Number(h) * 60 + Number(m);
+};
+
+const formatTime12Hour = (time) => {
+  if (!time) return '';
+  const [rawHour = '0', minute = '00'] = String(time).split(':');
+  let hour = Number(rawHour);
+  const ampm = hour >= 12 ? 'PM' : 'AM';
+  hour = hour % 12 || 12;
+  return `${hour}:${minute} ${ampm}`;
+};
+
+const formatUpcomingLabel = (daysAway, minutesAway) => {
+  if (daysAway === 0) {
+    if (minutesAway <= 0) return 'Now';
+    if (minutesAway < 60) return `In ${minutesAway} mins`;
+    const hours = Math.floor(minutesAway / 60);
+    const mins = minutesAway % 60;
+    return mins ? `In ${hours}h ${mins}m` : `In ${hours}h`;
+  }
+  if (daysAway === 1) return 'Tomorrow';
+  return `In ${daysAway} days`;
+};
+
+const normalizeScheduleRows = (rows = []) => rows
+  .map(row => {
+    const slot = row.timetable_slots;
+    if (!slot) return null;
+    return {
+      ...slot,
+      locked_at: row.locked_at,
+      teacher: slot.teacher || null,
+      room: slot.room?.name || null,
+    };
+  })
+  .filter(Boolean);
+
+const getUpcomingClasses = (schedule = [], limit = 3) => {
+  const now = new Date();
+  const currentDay = now.toLocaleDateString('en-US', { weekday: 'long' });
+  const currentDayIndex = DAY_ORDER.indexOf(currentDay);
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+  return schedule
+    .map(slot => {
+      const slotDayIndex = DAY_ORDER.indexOf(slot.day);
+      if (slotDayIndex === -1 || !slot.start_time) return null;
+
+      let daysAway = slotDayIndex - currentDayIndex;
+      if (daysAway < 0) daysAway += 7;
+
+      const startMinutes = minutesFromTime(slot.start_time);
+      if (daysAway === 0 && startMinutes < currentMinutes) daysAway = 7;
+
+      const minutesAway = daysAway * 24 * 60 + startMinutes - currentMinutes;
+
+      return {
+        ...slot,
+        time_label: `${formatTime12Hour(slot.start_time)} - ${formatTime12Hour(slot.end_time)}`,
+        starts_in: formatUpcomingLabel(daysAway, minutesAway),
+        sort_value: minutesAway,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.sort_value - b.sort_value)
+    .slice(0, limit);
+};
+
+const summarizeVersion = (version) => version ? ({
+  id: version.id,
+  semester_label: version.semester_label,
+  version_label: version.version_label,
+  uploaded_at: version.uploaded_at,
+  is_latest: version.is_latest,
+  slots_count: Number(version.slots_count || 0),
+  needs_review_count: Number(version.needs_review_count || 0),
+}) : null;
+
+const getLatestVersionByDepartment = (versions = []) => {
+  const map = new Map();
+  versions.forEach(version => {
+    const deptId = version.department_id;
+    if (!deptId) return;
+    const existing = map.get(deptId);
+    if (!existing) {
+      map.set(deptId, version);
+      return;
+    }
+
+    const versionTime = new Date(version.uploaded_at || 0).getTime();
+    const existingTime = new Date(existing.uploaded_at || 0).getTime();
+    const shouldReplace = (
+      (version.is_latest && !existing.is_latest) ||
+      (version.is_latest === existing.is_latest && versionTime > existingTime)
+    );
+    if (shouldReplace) map.set(deptId, version);
+  });
+  return map;
+};
 
 const getCalendarSemester = () => {
   const now = new Date();
@@ -153,6 +264,134 @@ router.get('/tokens/status', async (req, res) => {
     res.status(200).json(tokenStatus);
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+router.get('/overview', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const scopedUniversityId = isUuid(req.user.university_id) ? req.user.university_id : null;
+
+    const [
+      universitiesResult,
+      departmentsResult,
+      versionsResult,
+      scheduleResult,
+    ] = await Promise.all([
+      supabase.from('universities').select('id, name, city, country').order('name'),
+      scopedUniversityId
+        ? supabase.from('departments').select('id, name, code, university_id').eq('university_id', scopedUniversityId).order('name')
+        : supabase.from('departments').select('id, name, code, university_id').order('name'),
+      scopedUniversityId
+        ? supabase
+            .from('timetable_versions')
+            .select('id, department_id, semester_label, version_label, uploader_name, uploaded_at, is_latest, slots_count, needs_review_count, department:departments(id, name, code, university_id)')
+            .eq('department.university_id', scopedUniversityId)
+            .order('uploaded_at', { ascending: false })
+            .limit(100)
+        : supabase
+            .from('timetable_versions')
+            .select('id, department_id, semester_label, version_label, uploader_name, uploaded_at, is_latest, slots_count, needs_review_count, department:departments(id, name, code, university_id)')
+            .order('uploaded_at', { ascending: false })
+            .limit(100),
+      isDevUser(req.user)
+        ? Promise.resolve({ data: [], error: null })
+        : supabase
+            .from('student_enrollments')
+            .select(`
+              slot_id,
+              locked_at,
+              timetable_slots (
+                *,
+                teacher:timetable_teachers(name),
+                room:rooms(id, name)
+              )
+            `)
+            .eq('student_id', userId),
+    ]);
+
+    if (universitiesResult.error) throw universitiesResult.error;
+    if (departmentsResult.error) throw departmentsResult.error;
+    if (versionsResult.error) throw versionsResult.error;
+    if (scheduleResult.error) throw scheduleResult.error;
+
+    const universities = universitiesResult.data || [];
+    const departments = departmentsResult.data || [];
+    const versions = (versionsResult.data || []).filter(version => version.department);
+    const schedule = normalizeScheduleRows(scheduleResult.data || []);
+    const latestVersionByDepartment = getLatestVersionByDepartment(versions);
+
+    const currentUniversity =
+      universities.find(uni => uni.id === scopedUniversityId) ||
+      universities.find(uni => departments.some(dept => dept.university_id === uni.id)) ||
+      null;
+
+    const departmentsWithStatus = departments.map(department => {
+      const latest = latestVersionByDepartment.get(department.id);
+      return {
+        id: department.id,
+        name: department.name,
+        code: department.code,
+        latest_version: summarizeVersion(latest),
+      };
+    });
+
+    const latestUploadedVersion = [...versions].sort((a, b) =>
+      new Date(b.uploaded_at || 0).getTime() - new Date(a.uploaded_at || 0).getTime()
+    )[0] || null;
+
+    const recentUpdates = [];
+
+    const latestEnrollmentTime = schedule
+      .map(slot => slot.locked_at)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+
+    if (latestEnrollmentTime) {
+      recentUpdates.push({
+        id: `schedule-${latestEnrollmentTime}`,
+        type: 'schedule_saved',
+        title: 'Schedule saved',
+        description: `${schedule.length} class meetings are locked for makeup planning.`,
+        timestamp: latestEnrollmentTime,
+        tone: 'emerald',
+      });
+    }
+
+    versions.slice(0, 5).forEach(version => {
+      const reviewText = Number(version.needs_review_count || 0) > 0
+        ? `${version.needs_review_count} slots still need admin review.`
+        : 'Parsed and ready for students.';
+
+      recentUpdates.push({
+        id: `version-${version.id}`,
+        type: 'timetable_version',
+        title: `${version.department?.name || 'Department'} ${version.semester_label} published`,
+        description: `${version.version_label || 'Version'} · ${version.slots_count || 0} slots · ${reviewText}`,
+        timestamp: version.uploaded_at,
+        tone: Number(version.needs_review_count || 0) > 0 ? 'amber' : 'blue',
+      });
+    });
+
+    recentUpdates.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
+
+    res.status(200).json({
+      institution: {
+        current_university: currentUniversity,
+        connected_universities_count: universities.length,
+        departments_count: departments.length,
+        timetable_versions_count: versions.length,
+        latest_upload: summarizeVersion(latestUploadedVersion),
+      },
+      departments: departmentsWithStatus,
+      schedule: {
+        total_classes: schedule.length,
+        upcoming_classes: getUpcomingClasses(schedule, 3),
+      },
+      recent_updates: recentUpdates.slice(0, 6),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
