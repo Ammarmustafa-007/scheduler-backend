@@ -8,6 +8,47 @@ const router = express.Router();
 
 router.use(checkRole('admin'));
 
+const VALID_SLOT_TYPES = new Set(['free', 'lecture', 'lab', 'extended']);
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const normalizeOptionalText = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = String(value).trim();
+  return trimmed || null;
+};
+
+const normalizeDbTime = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const trimmed = String(value).trim();
+  if (/^\d{2}:\d{2}$/.test(trimmed)) return `${trimmed}:00`;
+  return trimmed;
+};
+
+const formatFlaggedSlot = (slot) => ({
+  ...slot,
+  teacher: slot.teacher?.name || null,
+  room: slot.room?.name || null
+});
+
+const getFlaggedSlotsForVersion = async (versionId) => {
+  const { data, error } = await supabase
+    .from('timetable_slots')
+    .select(`
+      *,
+      teacher:timetable_teachers(name),
+      room:rooms(name)
+    `)
+    .eq('version_id', versionId)
+    .eq('needs_review', true)
+    .order('day')
+    .order('start_time');
+
+  if (error) throw error;
+  return data.map(formatFlaggedSlot);
+};
+
 router.post('/upload', upload.single('file'), async (req, res) => {
   const uploadStartedAt = performance.now();
   const secondsSince = (start) => Number(((performance.now() - start) / 1000).toFixed(3));
@@ -154,7 +195,9 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       });
     }
 
-    const needs_review_slots = slots.filter(s => s.needs_review);
+    const needs_review_slots = summary.needs_review_count > 0
+      ? await getFlaggedSlotsForVersion(newVersionId)
+      : [];
     const timings = {
       parser_request_seconds,
       parser_json_seconds,
@@ -286,12 +329,43 @@ router.post('/universities', async (req, res) => {
   }
 });
 
+router.patch('/universities/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, city, country } = req.body;
+
+    if (!uuidRegex.test(id)) {
+      return res.status(400).json({ error: 'Invalid university ID' });
+    }
+
+    const updateData = {};
+    if (name !== undefined) updateData.name = normalizeOptionalText(name);
+    if (city !== undefined) updateData.city = normalizeOptionalText(city);
+    if (country !== undefined) updateData.country = normalizeOptionalText(country);
+
+    if (!updateData.name && name !== undefined) {
+      return res.status(400).json({ error: 'University name is required' });
+    }
+
+    const { data, error } = await supabase
+      .from('universities')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(200).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/departments', async (req, res) => {
   try {
     const { university_id } = req.query;
     let query = supabase.from('departments').select('*').order('name');
     if (university_id) {
-      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
       if (!uuidRegex.test(university_id)) {
         return res.status(200).json([]); // Mock ID means it doesn't exist in Postgres
       }
@@ -309,7 +383,6 @@ router.post('/departments', async (req, res) => {
   try {
     const { name, code, university_id } = req.body;
     
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     if (!uuidRegex.test(university_id)) {
       return res.status(400).json({ error: "Invalid university ID. Please create a real university first." });
     }
@@ -317,6 +390,47 @@ router.post('/departments', async (req, res) => {
     const { data, error } = await supabase.from('departments').insert([{ name, code, university_id }]).select().single();
     if (error) throw error;
     res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.patch('/departments/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, code, university_id } = req.body;
+
+    if (!uuidRegex.test(id)) {
+      return res.status(400).json({ error: 'Invalid department ID' });
+    }
+
+    const updateData = {};
+    if (name !== undefined) updateData.name = normalizeOptionalText(name);
+    if (code !== undefined) updateData.code = normalizeOptionalText(code)?.toUpperCase() || null;
+    if (university_id !== undefined) {
+      if (!uuidRegex.test(university_id)) {
+        return res.status(400).json({ error: 'Invalid university ID' });
+      }
+      updateData.university_id = university_id;
+    }
+
+    if (!updateData.name && name !== undefined) {
+      return res.status(400).json({ error: 'Department name is required' });
+    }
+
+    if (!updateData.code && code !== undefined) {
+      return res.status(400).json({ error: 'Department code is required' });
+    }
+
+    const { data, error } = await supabase
+      .from('departments')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(200).json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -404,28 +518,149 @@ router.patch('/versions/:id/set-latest', async (req, res) => {
 router.get('/versions/:id/flagged', async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Fetch slots that need review for this version, join with teacher and room names
-    const { data, error } = await supabase
+
+    res.status(200).json(await getFlaggedSlotsForVersion(id));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.patch('/slots/:id/review', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      subject,
+      section,
+      teacher,
+      room,
+      day,
+      start_time,
+      end_time,
+      slot_type,
+      col_span,
+      mark_reviewed = true,
+    } = req.body;
+
+    const { data: existingSlot, error: slotError } = await supabase
       .from('timetable_slots')
+      .select('id, version_id')
+      .eq('id', id)
+      .single();
+
+    if (slotError) {
+      if (slotError.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Slot not found' });
+      }
+      throw slotError;
+    }
+
+    const { data: version, error: versionError } = await supabase
+      .from('timetable_versions')
+      .select('department_id')
+      .eq('id', existingSlot.version_id)
+      .single();
+
+    if (versionError) throw versionError;
+
+    const { data: department, error: departmentError } = await supabase
+      .from('departments')
+      .select('university_id')
+      .eq('id', version.department_id)
+      .single();
+
+    if (departmentError) throw departmentError;
+
+    const universityId = department.university_id;
+    const updateData = {};
+
+    if (subject !== undefined) updateData.subject = normalizeOptionalText(subject);
+    if (section !== undefined) updateData.section = normalizeOptionalText(section);
+    if (day !== undefined) updateData.day = normalizeOptionalText(day);
+    if (start_time !== undefined) updateData.start_time = normalizeDbTime(start_time);
+    if (end_time !== undefined) updateData.end_time = normalizeDbTime(end_time);
+
+    if (slot_type !== undefined) {
+      const normalizedSlotType = normalizeOptionalText(slot_type) || 'lecture';
+      if (!VALID_SLOT_TYPES.has(normalizedSlotType)) {
+        return res.status(400).json({ error: 'Invalid slot_type' });
+      }
+      updateData.slot_type = normalizedSlotType;
+    }
+
+    if (col_span !== undefined) {
+      updateData.col_span = Math.max(1, Number(col_span) || 1);
+    }
+
+    if (teacher !== undefined) {
+      const teacherName = normalizeOptionalText(teacher);
+      if (teacherName) {
+        const { data: teacherRow, error: teacherError } = await supabase
+          .from('timetable_teachers')
+          .upsert(
+            { name: teacherName, university_id: universityId },
+            { onConflict: 'university_id,name' }
+          )
+          .select('id')
+          .single();
+
+        if (teacherError) throw teacherError;
+        updateData.teacher_id = teacherRow.id;
+      } else {
+        updateData.teacher_id = null;
+      }
+    }
+
+    if (room !== undefined) {
+      const roomName = normalizeOptionalText(room);
+      if (roomName) {
+        const { data: roomRow, error: roomError } = await supabase
+          .from('rooms')
+          .upsert(
+            { name: roomName, university_id: universityId },
+            { onConflict: 'university_id,name' }
+          )
+          .select('id')
+          .single();
+
+        if (roomError) throw roomError;
+        updateData.room_id = roomRow.id;
+      } else {
+        updateData.room_id = null;
+      }
+    }
+
+    if (mark_reviewed) updateData.needs_review = false;
+
+    const { data: updatedSlot, error: updateError } = await supabase
+      .from('timetable_slots')
+      .update(updateData)
+      .eq('id', id)
       .select(`
         *,
         teacher:timetable_teachers(name),
         room:rooms(name)
       `)
-      .eq('version_id', id)
+      .single();
+
+    if (updateError) throw updateError;
+
+    const { count, error: countError } = await supabase
+      .from('timetable_slots')
+      .select('*', { count: 'exact', head: true })
+      .eq('version_id', existingSlot.version_id)
       .eq('needs_review', true);
 
-    if (error) throw error;
+    if (countError) throw countError;
 
-    // Map to a cleaner object for the frontend
-    const flaggedSlots = data.map(slot => ({
-      ...slot,
-      teacher: slot.teacher?.name || slot.teacher_id,
-      room: slot.room?.name || slot.room_id
-    }));
+    await supabase
+      .from('timetable_versions')
+      .update({ needs_review_count: count || 0 })
+      .eq('id', existingSlot.version_id);
 
-    res.status(200).json(flaggedSlots);
+    res.status(200).json({
+      ...formatFlaggedSlot(updatedSlot),
+      remaining_needs_review_count: count || 0,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

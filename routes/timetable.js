@@ -182,7 +182,7 @@ router.get('/subjects', async (req, res) => {
     while (true) {
       const { data: pageData, error: slotsError } = await supabase
         .from('timetable_slots')
-        .select('*, teacher:timetable_teachers(id, name)')
+        .select('*, teacher:timetable_teachers(id, name), room:rooms(id, name)')
         .eq('version_id', version_id)
         .range(from, from + pageSize - 1);
         
@@ -252,7 +252,7 @@ router.get('/subjects', async (req, res) => {
           start_time: slot.start_time,
           end_time: slot.end_time,
           slot_number: slot.slot_number,
-          room: slot.room
+          room: slot.room?.name || null
         });
       } else {
         subjectMap[slot.subject].available_sections.push({
@@ -265,7 +265,7 @@ router.get('/subjects', async (req, res) => {
              start_time: slot.start_time,
              end_time: slot.end_time,
              slot_number: slot.slot_number,
-             room: slot.room
+             room: slot.room?.name || null
           }]
         });
       }
